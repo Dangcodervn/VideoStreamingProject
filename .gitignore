@@ -1,0 +1,31 @@
+# Environment variables - KHÔNG commit key lên Git
+.env
+
+# Upload progress
+upload_checkpoint.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Spark / Hadoop
+*.crc
+_SUCCESS
+
+# Data folders (thường quá lớn để commit)
+data/raw/
+data/cleaned/
+
+# OS
+.DS_Store
+Thumbs.db
