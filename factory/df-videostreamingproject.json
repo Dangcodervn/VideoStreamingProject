@@ -1,0 +1,9 @@
+{
+	"name": "df-videostreamingproject",
+	"location": "southeastasia",
+	"identity": {
+		"type": "SystemAssigned",
+		"principalId": "eed014c1-2e82-459c-95b1-c1c38586bd85",
+		"tenantId": "e2f6449a-9194-40cb-8f04-8057c2c81222"
+	}
+}
