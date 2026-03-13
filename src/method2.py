@@ -1,109 +1,54 @@
 import os
-import re
-import hashlib
 from datetime import datetime
 
-from pyspark.sql.functions import lit
-from transform import transform
-
-DATE_PATTERN = re.compile(r"(\d{8})")
+from pyspark.sql.functions import sum as fsum
+from transform import transform, PIVOT_TYPES, add_most_watched, add_customer_taste
 
 
-def extract_date(file_path: str) -> str:
-    base = os.path.basename(file_path)
-    m = DATE_PATTERN.search(base)
-    return m.group(1) if m else "unknown"
-
-
-def build_unique_tag(existing_files, meta=None) -> str:
-    """
-    Build a unique tag for output folder to avoid overwrite collisions.
-
-    Tag format:
-      <mode>_<min>_<max>_<n>files_<hash6>
-
-    Example:
-      range_20220401_20220409_9files_a83f2b
-      files_20220401_20220409_2files_19c4d1
-    """
-    mode = "range"
-    if meta and meta.get("mode") == "file_list":
-        mode = "files"
-    elif meta and meta.get("mode") == "date_range":
-        mode = "range"
-
-    dates = [extract_date(p) for p in existing_files]
-    dates = [d for d in dates if d != "unknown"]
-
-    if dates:
-        dmin, dmax = min(dates), max(dates)
-    else:
-        # fallback if cannot infer date from filenames
-        now_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
-        dmin, dmax = now_tag, now_tag
-
-    nfiles = len(existing_files)
-
-    # Hash based on the exact selected file set (stable + unique)
-    joined = "|".join(sorted(os.path.basename(p) for p in existing_files))
-    hash6 = hashlib.md5(joined.encode("utf-8")).hexdigest()[:6]
-
-    return f"{mode}_{dmin}_{dmax}_{nfiles}files_{hash6}"
-
-
-def write_output_csv(df, output_path: str):
-    """Write output as CSV (Spark writes a folder; coalesce(1) -> 1 part file)."""
-    (
-        df.coalesce(1)
-        .write
-        .mode("overwrite")
-        .option("header", "true")
-        .csv(output_path)
-    )
-
-
-def run_method2(spark, selected_paths, output_dir, meta=None):
-    """
-    Method 2:
-    - Read multiple files at once
-    - Transform once
-    - Write one output folder (unique tag to avoid overwrite collisions)
-    """
+def run_method2(spark, selected_paths):
+    """Transform each file individually, union results, then re-aggregate by Contract."""
     if not selected_paths:
         print("[STOP] No files selected.")
-        return
+        return None
 
-    existing_files = [p for p in selected_paths if os.path.exists(p)]
-    missing_files = [p for p in selected_paths if not os.path.exists(p)]
+    existing = [p for p in selected_paths if os.path.exists(p)]
+    missing  = [p for p in selected_paths if not os.path.exists(p)]
 
-    if missing_files:
-        print(f"[WARN] Missing {len(missing_files)} file(s). Showing up to 10:")
-        for p in missing_files[:10]:
-            print(" -", p)
-
-    if not existing_files:
+    if missing:
+        print(f"[WARN] {len(missing)} file(s) not found, skipping.")
+    if not existing:
         print("[STOP] No valid files found.")
-        return
+        return None
 
-    tag = build_unique_tag(existing_files, meta)
-
-    print(f"\n[INFO] Running Method 2 on {len(existing_files)} file(s)")
-    print(f"[INFO] Output tag: {tag}")
-
+    print(f"\n[INFO] Method 2 — transforming {len(existing)} file(s) individually")
     start_time = datetime.now()
 
-    # Read all files at once (Spark unions internally)
-    raw_df = spark.read.json(existing_files)
+    accumulated = None
+    for i, file_path in enumerate(existing, 1):
+        fname = os.path.basename(file_path)
+        print(f"[{i:02d}/{len(existing)}] Processing: {fname}")
+        raw_df = spark.read.json(file_path)
+        df_transformed = transform(raw_df)
+        if accumulated is None:
+            accumulated = df_transformed
+        else:
+            accumulated = accumulated.union(df_transformed)
+        accumulated.cache()
 
-    # Transform
-    result = transform(raw_df)
-
-    # Output path
-    out_path = os.path.join(output_dir, "method2_clean", f"run={tag}")
-
-    # Write
-    write_output_csv(result, out_path)
+    print("\n[INFO] Aggregating after union...")
+    result = (
+        accumulated
+        .groupBy("Contract")
+        .agg(
+            *[fsum(t).alias(t) for t in PIVOT_TYPES],
+            fsum("TotalDevices").alias("TotalDevices"),
+        )
+    )
+    result = add_most_watched(result)
+    result = add_customer_taste(result)
+    print(f"[INFO] Total contracts: {result.count():,}")
+    result.show(10)
 
     end_time = datetime.now()
-    print(f"[OK] Output saved to: {out_path}")
     print("[DONE] Total seconds:", (end_time - start_time).total_seconds())
+    return result

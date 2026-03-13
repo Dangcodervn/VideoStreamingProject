@@ -22,9 +22,9 @@ build/
 *.crc
 _SUCCESS
 
-# Data folders (thường quá lớn để commit)
-data/raw/
-data/cleaned/
+# Data folders — too large to commit
+data/bronze/
+data/silver/
 
 # OS
 .DS_Store

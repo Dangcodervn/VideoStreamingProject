@@ -1,14 +1,18 @@
 import os
 from datetime import datetime, timedelta
+from dotenv import load_dotenv
 
 from pyspark.sql import SparkSession
 from method1 import run_method1
 from method2 import run_method2
 
+_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
+load_dotenv(os.path.join(_ROOT, ".env"))
 
-# ==============================
-# COMMON HELPERS
-# ==============================
+DATABASE_NAME     = os.getenv("DATABASE_NAME")
+DATABASE_USER     = os.getenv("DATABASE_USER")
+DATABASE_PASSWORD = os.getenv("DATABASE_PASSWORD")
+
 
 def ask_dir(prompt: str, must_exist=True, create_if_missing=False):
     p = input(prompt).strip().strip('"').strip("'")
@@ -81,9 +85,23 @@ def select_inputs(input_dir: str):
     return paths, meta
 
 
-# ==============================
-# MAIN
-# ==============================
+def import_to_mysql(result):
+
+    url = f"jdbc:mysql://localhost:3306/{DATABASE_NAME}"
+    driver = "com.mysql.cj.jdbc.Driver"
+
+    result.write \
+        .format("jdbc") \
+        .option("url", url) \
+        .option("driver", driver) \
+        .option("dbtable", "customer_content_stats") \
+        .option("user", DATABASE_USER) \
+        .option("password", DATABASE_PASSWORD) \
+        .mode("append") \
+        .save()
+
+    print("Data Import Successfully")
+
 
 def main():
     print("=== ETL APPLICATION ===")
@@ -91,12 +109,6 @@ def main():
     input_dir = ask_dir(
         "Enter input data folder path: ",
         must_exist=True
-    )
-
-    output_dir = ask_dir(
-        "Enter output folder path: ",
-        must_exist=False,
-        create_if_missing=True
     )
 
     selected_paths, meta = select_inputs(input_dir)
@@ -113,8 +125,8 @@ def main():
     print(f"Total: {len(selected_paths)} file(s)")
 
     print("\nChoose processing method:")
-    print("1) Method 1 - Process each file separately")
-    print("2) Method 2 - Merge files and process once")
+    print("1) Method 1 - Read all files at once → Transform once")
+    print("2) Method 2 - Transform each file separately → Union")
 
     method = input("Method (1/2): ").strip()
 
@@ -126,13 +138,44 @@ def main():
     )
 
     if method == "1":
-        run_method1(spark, selected_paths, output_dir)
-
+        result = run_method1(spark, selected_paths)
     elif method == "2":
-        run_method2(spark, selected_paths, output_dir, meta)
-
+        result = run_method2(spark, selected_paths)
     else:
         print("Invalid method selected.")
+        return
+
+    if result is None:
+        return
+
+    print("\nChoose storage destination:")
+    print("1) CSV   - Save to local folder")
+    print("3) MySQL - Import to MySQL database")
+
+    storage = input("Storage (1/3): ").strip()
+
+    if storage == "1":
+        output_dir = ask_dir(
+            "Enter output folder path: ",
+            must_exist=False,
+            create_if_missing=True
+        )
+        method_folder = "method1_result" if method == "1" else "method2_result"
+        out_path = os.path.join(output_dir, method_folder)
+        (
+            result.coalesce(1)
+                  .write
+                  .mode("overwrite")
+                  .option("header", "true")
+                  .csv(out_path)
+        )
+        print(f"[OK] Saved to: {out_path}")
+
+    elif storage == "3":
+        import_to_mysql(result)
+
+    else:
+        print("Invalid storage option.")
 
 if __name__ == "__main__":
     main()

@@ -1,7 +1,7 @@
 from pyspark.sql import DataFrame
-from pyspark.sql.functions import col, when, sum as fsum
+from pyspark.sql.functions import col, when, sum as fsum, count, greatest, concat_ws
 
-# Danh sách Type cố định để pivot ổn định schema
+# Fixed list to ensure stable pivot schema
 PIVOT_TYPES = [
     "Truyền Hình",
     "Phim Truyện",
@@ -11,28 +11,12 @@ PIVOT_TYPES = [
 ]
 
 
-# -----------------------------
-# 1. Select _source.*
-# -----------------------------
 def select_source(df: DataFrame) -> DataFrame:
-    """
-    JSON log có cấu trúc:
-    {
-        "_source": {...}
-    }
-
-    Lấy toàn bộ field bên trong _source.
-    """
     return df.select("_source.*")
 
 
-# -----------------------------
-# 2. Map AppName -> Type
-# -----------------------------
 def add_type(df: DataFrame) -> DataFrame:
-    """
-    Phân loại AppName thành nhóm nội dung.
-    """
+    """Map AppName to content category."""
     return df.withColumn(
         "Type",
         when(col("AppName").isin("CHANNEL", "DSHD", "KPLUS", "KPlus"), "Truyền Hình")
@@ -47,22 +31,19 @@ def add_type(df: DataFrame) -> DataFrame:
     )
 
 
-# -----------------------------
-# 3. Clean + Aggregate base
-# -----------------------------
+def calculate_devices(df: DataFrame) -> DataFrame:
+    """Count unique devices (Mac) per Contract."""
+    return (
+        df.select("Contract", "Mac")
+          .groupBy("Contract")
+          .agg(count("Mac").alias("TotalDevices"))
+    )
+
+
 def clean_base(df: DataFrame) -> DataFrame:
-    """
-    - Giữ các cột cần thiết
-    - Loại Contract = 0
-    - Loại Type = Error
-    - Cast TotalDuration về double
-    - Aggregate theo Contract + Type
-    """
+    """Cast TotalDuration and aggregate by Contract + Type."""
 
     df = df.select("Contract", "Type", "TotalDuration")
-
-    df = df.filter(col("Contract") != "0")
-    df = df.filter(col("Type") != "Error")
 
     df = df.withColumn(
         "TotalDuration",
@@ -75,14 +56,8 @@ def clean_base(df: DataFrame) -> DataFrame:
     )
 
 
-# -----------------------------
-# 4. Pivot
-# -----------------------------
 def pivot_contract_type(df: DataFrame) -> DataFrame:
-    """
-    Pivot Type thành các cột.
-    Kết quả: 1 dòng / Contract
-    """
+    """Pivot Type into columns — one row per Contract."""
 
     return (
         df.groupBy("Contract")
@@ -92,18 +67,43 @@ def pivot_contract_type(df: DataFrame) -> DataFrame:
     )
 
 
-# -----------------------------
-# 5. Main transform
-# -----------------------------
+def add_most_watched(df: DataFrame) -> DataFrame:
+    """Add Most_Watched column: category with the highest total duration."""
+    return df.withColumn(
+        "Most_Watched",
+        when(greatest(*[col(t) for t in PIVOT_TYPES]) == col("Truyền Hình"), "Truyền Hình")
+        .when(greatest(*[col(t) for t in PIVOT_TYPES]) == col("Phim Truyện"), "Phim Truyện")
+        .when(greatest(*[col(t) for t in PIVOT_TYPES]) == col("Giải Trí"), "Giải Trí")
+        .when(greatest(*[col(t) for t in PIVOT_TYPES]) == col("Thiếu Nhi"), "Thiếu Nhi")
+        .when(greatest(*[col(t) for t in PIVOT_TYPES]) == col("Thể Thao"), "Thể Thao")
+        .otherwise("Error")
+    )
+
+
+def add_customer_taste(df: DataFrame) -> DataFrame:
+    """Add Customer_Taste: first non-zero category the customer watched."""
+    return df.withColumn(
+        "Customer_Taste",
+        concat_ws(", ",
+            when(col("Giải Trí") > 0, "Giải Trí")
+            .when(col("Thiếu Nhi") > 0, "Thiếu Nhi")
+            .when(col("Thể Thao") > 0, "Thể Thao")
+            .when(col("Truyền Hình") > 0, "Truyền Hình")
+            .when(col("Phim Truyện") > 0, "Phim Truyện")
+            .otherwise("Error")
+        )
+    )
+
+
 def transform(df: DataFrame) -> DataFrame:
-    """
-    Hàm transform chính.
-    Nhận DataFrame raw -> trả DataFrame summary đã pivot.
-    """
+    """Full transform pipeline: raw JSON DataFrame → pivoted summary."""
 
     df = select_source(df)
+    total_devices = calculate_devices(df)
     df = add_type(df)
     df = clean_base(df)
     df = pivot_contract_type(df)
-
+    df = df.join(total_devices, "Contract", "inner")
+    df = add_most_watched(df)
+    df = add_customer_taste(df)
     return df
